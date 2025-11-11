@@ -1,0 +1,16 @@
+# Ignore datasets and outputs
+datasets/
+outputs/
+outputs_prev/
+RS_Papers/
+
+# Ignore checkpoints, logs, and cache
+*.pt
+*.pth
+*.ckpt
+__pycache__/
+*.log
+*.npy
+*.pdf
+# VSCode
+.vscode/
