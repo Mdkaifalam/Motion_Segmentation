@@ -1,0 +1,111 @@
+"""
+compute_flow_raft.py
+--------------------------------
+Computes RAFT optical flow for DAVIS-2017 sequences.
+
+Outputs:
+- flow_npy: HxWx2 raw flow
+- flow_rgb: HxWx3 color-coded flow (for FlowI-SAM input)
+
+Usage:
+python src/compute_flow_raft.py --davis_root datasets/DAVIS2017 \
+                                --out_root datasets/DAVIS2017/Flows/RAFT \
+                                --model_path third_party/RAFT/models/raft-things.pth
+"""
+
+import os
+import argparse
+import cv2
+import torch
+import numpy as np
+from tqdm import tqdm
+
+# RAFT imports
+import sys
+sys.path.append("third_party/RAFT")
+from raft import RAFT
+from utils import flow_viz
+from utils.utils import InputPadder
+
+
+def load_image(im_path):
+    """Load image as torch tensor normalized to [0,1]."""
+    img = cv2.imread(im_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = torch.from_numpy(img).permute(2,0,1).float()[None] / 255.0
+    return img
+
+
+
+def save_flow_color(flow, save_path):
+    """Convert RAFT flow (HxWx2) to optical-flow color wheel image."""
+    flow_rgb = flow_viz.flow_to_image(flow)   # returns HxWx3 uint8
+    cv2.imwrite(save_path, cv2.cvtColor(flow_rgb, cv2.COLOR_RGB2BGR))
+
+
+@torch.no_grad()
+def compute_flow(model, img1, img2):
+    """Compute optical flow using RAFT."""
+    padder = InputPadder(img1.shape)
+    img1, img2 = padder.pad(img1, img2)
+
+    flow_low, flow_up = model(img1, img2, iters=20, test_mode=True)
+    flow = flow_up[0].permute(1,2,0).cpu().numpy()  # HxWx2
+    return flow
+
+
+def process_sequence(seq_path, out_flow_path, out_color_path, model):
+    """Compute flow for every pair of frames in a DAVIS sequence."""
+    frames = sorted(os.listdir(seq_path))
+    frames = [f for f in frames if f.endswith(".jpg")]
+
+    os.makedirs(out_flow_path, exist_ok=True)
+    os.makedirs(out_color_path, exist_ok=True)
+
+    for i in range(len(frames) - 1):
+        f1 = os.path.join(seq_path, frames[i])
+        f2 = os.path.join(seq_path, frames[i+1])
+        img1 = load_image(f1).cuda()
+        img2 = load_image(f2).cuda()
+
+        flow = compute_flow(model, img1, img2)
+
+        # Save raw flow
+        npy_name = f"{frames[i][:-4]}_{frames[i+1][:-4]}.npy"
+        np.save(os.path.join(out_flow_path, npy_name), flow)
+
+        # Save flow-color
+        png_name = f"{frames[i][:-4]}_{frames[i+1][:-4]}.png"
+        save_flow_color(flow, os.path.join(out_color_path, png_name))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--davis_root", type=str, required=True,
+                        help="datasets/DAVIS2017")
+    parser.add_argument("--model_path", type=str, required=True,
+                        help="RAFT checkpoint")
+    parser.add_argument("--out_root", type=str, required=True,
+                        help="Output folder to store flows")
+    args = parser.parse_args()
+
+    jpeg_path = os.path.join(args.davis_root, "JPEGImages", "480p")
+
+    # Load RAFT model
+    model = RAFT(restore_ckpt=args.model_path)
+    model = model.cuda().eval()
+
+    sequences = sorted(os.listdir(jpeg_path))
+
+    for seq in sequences:
+        print(f"Processing sequence: {seq}")
+
+        seq_path = os.path.join(jpeg_path, seq)
+        out_flow_path = os.path.join(args.out_root, "flow_npy", seq)
+        out_color_path = os.path.join(args.out_root, "flow_rgb", seq)
+
+        process_sequence(seq_path, out_flow_path, out_color_path, model)
+
+
+if __name__ == "__main__":
+    main()

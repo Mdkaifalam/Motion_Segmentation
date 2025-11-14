@@ -1,9 +1,10 @@
 # Ignore datasets and outputs
 datasets/
-outputs/
+outputs_baseline/
 outputs_prev/
 RS_Papers/
-
+checks/
+third_party/
 # Ignore checkpoints, logs, and cache
 *.pt
 *.pth

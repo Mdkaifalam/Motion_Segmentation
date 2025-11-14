@@ -46,5 +46,43 @@ python Code/baseline/run_flow_seg_and_eval.py \
   --A_min 1500 \
   --fps 15 \
   --verbose
+```
+
 ### Tech Stack
 Python, OpenCV, PyTorch, NumPy, HuggingFace, Segment Anything, RAFT
+
+
+### Variant 2
+
+- Step 1 : Download RAFT to get the optical flow of the images
+
+```
+mkdir third_party
+cd third_party
+git clone https://github.com/princeton-vl/RAFT.git
+cd RAFT
+bash download_models.sh
+```
+
+RAFT Directory Structure
+third_party/
+└── RAFT/
+    ├── alt_cuda_corr/
+    ├── core/
+    ├── demo-frames/
+    ├── models/
+    │   ├── raft-things.pth
+    │   └── raft-sintel.pth
+    ├── __pycache__/
+    ├── .gitignore
+    ├── chairs_split.txt
+    ├── demo.py
+    ├── download_models.sh
+    ├── evaluate.py
+    ├── LICENSE
+    ├── RAFT.png
+    ├── README.md
+    ├── train.py
+    ├── train_mixed.sh
+    ├── train_standard.sh
+    └── utils/

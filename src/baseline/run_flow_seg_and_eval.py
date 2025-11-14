@@ -339,7 +339,7 @@ if __name__ == "__main__":
     parser.add_argument("--sequence",    type=str, default=sequence_default,
                         help="Sequence name (e.g., bear, bmx-bumps)")
     
-    output_root_default = "./outputs"
+    output_root_default = "./outputs_baseline"
     parser.add_argument("--output_root", type=str, default=output_root_default,
                         help="Where to save outputs")
     gt_root_default = "datasets/DAVIS/Annotations/480p"
