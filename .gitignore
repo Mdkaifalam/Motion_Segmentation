@@ -5,6 +5,7 @@ outputs_prev/
 RS_Papers/
 checks/
 third_party/
+Variant_1_output/
 # Ignore checkpoints, logs, and cache
 *.pt
 *.pth

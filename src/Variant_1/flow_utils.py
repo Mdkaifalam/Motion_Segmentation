@@ -1,15 +1,13 @@
 """
-flow_utils.py
---------------------------------
-Utility functions for:
-- Loading RAFT flow (.npy)
-- Computing magnitude map
-- Thresholding to motion mask
-- Morphological cleaning
-- Extracting connected components
-- Returning blob bounding boxes + centroids
-
-Used for Flow-SAM prompts.
+flow_utils.py  (IMPROVED – Noise-Reduced Version)
+-----------------------------------------------
+Noise reduction upgrades:
+- Bilateral + Gaussian smoothing on magnitude
+- Normalization to [0,255]
+- Percentile thresholding (recommended for RAFT)
+- Larger morphological kernel
+- Higher min-area filtering
+- Optional Otsu/Top-p threshold modes
 """
 
 import numpy as np
@@ -17,113 +15,117 @@ import cv2
 
 
 # -------------------------------------------------------------
-# Load flow (HxWx2) from .npy file
+# Load flow (.npy)
 # -------------------------------------------------------------
 def load_flow_npy(flow_path):
-    """
-    Load a RAFT optical flow saved as numpy array (HxWx2).
-    """
-    flow = np.load(flow_path)  # shape (H, W, 2)
+    flow = np.load(flow_path)       # shape (H, W, 2)
     return flow
 
 
 # -------------------------------------------------------------
-# Compute magnitude map
+# Compute |flow|
 # -------------------------------------------------------------
 def flow_magnitude(flow):
-    """
-    Compute |flow| magnitude sqrt(u^2 + v^2)
-    """
     u = flow[..., 0]
     v = flow[..., 1]
-    mag = np.sqrt(u**2 + v**2)
-    return mag
+    mag = np.sqrt(u*u + v*v)
+    return mag.astype(np.float32)
 
 
 # -------------------------------------------------------------
-# Threshold magnitude to get initial motion mask
+# Percentile threshold (recommended for RAFT)
 # -------------------------------------------------------------
-def threshold_motion(mag, thresh=1.5):
-    """
-    Simple threshold on magnitude.
-    Higher threshold -> fewer blobs.
-    """
-    mask = (mag > thresh).astype(np.uint8) * 255
+def percentile_threshold(mag_norm, percentile=97.0):
+    th = np.percentile(mag_norm, percentile)
+    mask = (mag_norm > th).astype(np.uint8) * 255
     return mask
 
 
 # -------------------------------------------------------------
-# Morphological cleanup (optional but strongly recommended)
+# Clean mask (noise reduction)
 # -------------------------------------------------------------
-def clean_motion_mask(mask, kernel_size=5):
+def clean_motion_mask(mask, kernel_size=9):
     """
-    Apply morphological opening + closing to reduce noise.
+    Larger kernel = more aggressive noise removal.
     """
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
-    # Remove small noise dots
-    cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    # Remove dots
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    # Fill small holes / connect parts
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+    # Fill holes
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    return cleaned
+    return mask
 
 
 # -------------------------------------------------------------
-# Extract connected-component blobs
+# Connected-components filtering
 # -------------------------------------------------------------
-def extract_motion_blobs(mask, min_area=50):
+def extract_motion_blobs(mask, min_area=2000):
     """
-    Finds connected components in motion mask.
-    Returns:
-        blobs = [
-            {
-                'bbox': (x1, y1, x2, y2),
-                'centroid': (cx, cy),
-                'area': area
-            },
-            ...
-        ]
+    Removes very tiny noisy blobs from RAFT.
     """
-
-    # Ensure binary format
     _, binary = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
 
     blobs = []
-
-    for i in range(1, num_labels):  # skip background (0)
+    for i in range(1, num_labels):  # skip background
         x, y, w, h, area = stats[i]
-
-        if area < min_area:
+        if area < min_area:         # << MUCH stronger filtering
             continue
 
         cx, cy = centroids[i]
-
-        blob = {
-            "bbox": (x, y, x + w, y + h),
+        blobs.append({
+            "bbox": (x, y, x+w, y+h),
             "centroid": (int(cx), int(cy)),
             "area": area
-        }
-
-        blobs.append(blob)
+        })
 
     return blobs
 
 
 # -------------------------------------------------------------
-# Full pipeline from flow_path -> blobs
+# FULL PIPELINE FOR FLOW → CLEAN MASK + BLOBS
 # -------------------------------------------------------------
-def get_motion_blobs_from_flow(flow_path, mag_thresh=1.5, min_area=50):
+def get_motion_blobs_from_flow(
+        flow_path,
+        percentile=97.0,
+        smooth_kernel=7,
+        bilateral=True,
+        min_area=2000):
     """
-    Full pipeline:
-    Load flow -> magnitude -> threshold -> clean -> blob extraction
+    Full noise-reduced pipeline:
+    - Load flow
+    - Magnitude
+    - Smoothing (bilateral + Gaussian)
+    - Normalize
+    - Percentile threshold (recommended)
+    - Morphology
+    - Connected-components
     """
+
     flow = load_flow_npy(flow_path)
     mag = flow_magnitude(flow)
-    mask = threshold_motion(mag, thresh=mag_thresh)
-    cleaned = clean_motion_mask(mask)
-    blobs = extract_motion_blobs(cleaned, min_area=min_area)
-    return blobs, cleaned, mag
+
+    # 1) Bilateral (best noise reducer for RAFT)
+    if bilateral:
+        mag = cv2.bilateralFilter(mag, 7, 50, 50)
+
+    # 2) Gaussian smoothing
+    k = smooth_kernel if smooth_kernel % 2 == 1 else smooth_kernel + 1
+    mag = cv2.GaussianBlur(mag, (k, k), 0)
+
+    # 3) Normalize to 0..255
+    mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # 4) Percentile threshold
+    mask = percentile_threshold(mag_norm, percentile=percentile)
+
+    # 5) Morph cleaning
+    mask = clean_motion_mask(mask, kernel_size=9)
+
+    # 6) Connected component filtering
+    blobs = extract_motion_blobs(mask, min_area=min_area)
+
+    return blobs, mask, mag_norm

@@ -1,16 +1,18 @@
 """
-compute_flow_raft.py
---------------------------------
-Computes RAFT optical flow for DAVIS-2017 sequences.
+compute_flow_raft.py  
+(MULTI-GAP + CAMERA-MOTION REMOVAL + TEMPORAL SMOOTHING)
+--------------------------------------------------------
+
+This script generates FlowI-SAM–ready flow maps using:
+
+1. Multi-gap RAFT flow:
+      t→t+1, t→t−1, t→t+2, t→t−2
+2. Balanced global camera-motion removal (RANSAC on background pixels)
+3. Temporal smoothing across frames
 
 Outputs:
-- flow_npy: HxWx2 raw flow
-- flow_rgb: HxWx3 color-coded flow (for FlowI-SAM input)
-
-Usage:
-python src/compute_flow_raft.py --davis_root datasets/DAVIS2017 \
-                                --out_root datasets/DAVIS2017/Flows/RAFT \
-                                --model_path third_party/RAFT/models/raft-things.pth
+- flow_npy/<seq>/*.npy   -> HxWx2 flow (stable, denoised)
+- flow_rgb/<seq>/*.png   -> color-coded flow visualization
 """
 
 import os
@@ -19,92 +21,237 @@ import cv2
 import torch
 import numpy as np
 from tqdm import tqdm
-
-# RAFT imports
+from PIL import Image
 import sys
-sys.path.append("third_party/RAFT")
+
+# ------------ OpenMP duplicated library workaround (Windows) ------------
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# ------------ FIX RAFT IMPORT STRUCTURE ------------
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))          # /src/...
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))   # project root
+RAFT_PATH = os.path.join(PROJECT_ROOT, "third_party", "RAFT", "core")
+sys.path.insert(0, RAFT_PATH)
+
 from raft import RAFT
 from utils import flow_viz
 from utils.utils import InputPadder
 
-
-def load_image(im_path):
-    """Load image as torch tensor normalized to [0,1]."""
-    img = cv2.imread(im_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = torch.from_numpy(img).permute(2,0,1).float()[None] / 255.0
-    return img
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+# =====================================================================
+# UTILS
+# =====================================================================
 
-def save_flow_color(flow, save_path):
-    """Convert RAFT flow (HxWx2) to optical-flow color wheel image."""
-    flow_rgb = flow_viz.flow_to_image(flow)   # returns HxWx3 uint8
-    cv2.imwrite(save_path, cv2.cvtColor(flow_rgb, cv2.COLOR_RGB2BGR))
+def img_to_tensor(img_np):
+    """Convert RGB numpy image → torch tensor on device."""
+    return torch.from_numpy(img_np).permute(2,0,1).float()[None].to(DEVICE) / 255.0
 
 
 @torch.no_grad()
-def compute_flow(model, img1, img2):
-    """Compute optical flow using RAFT."""
+def run_raft(model, img1, img2, iters=32):
+    """Runs RAFT inference on two image tensors."""
     padder = InputPadder(img1.shape)
     img1, img2 = padder.pad(img1, img2)
-
-    flow_low, flow_up = model(img1, img2, iters=20, test_mode=True)
-    flow = flow_up[0].permute(1,2,0).cpu().numpy()  # HxWx2
-    return flow
+    flow_low, flow_up = model(img1, img2, iters=iters, test_mode=True)
+    return flow_up[0].permute(1,2,0).cpu().numpy()   # H,W,2
 
 
-def process_sequence(seq_path, out_flow_path, out_color_path, model):
-    """Compute flow for every pair of frames in a DAVIS sequence."""
-    frames = sorted(os.listdir(seq_path))
-    frames = [f for f in frames if f.endswith(".jpg")]
+# =====================================================================
+# CAMERA MOTION REMOVAL
+# =====================================================================
+
+def remove_global_motion(
+    flow,
+    bg_percentile=70.0,
+    sample_ratio=0.05,
+    min_bg_points=2000,
+    ransac_thresh=3.0,
+    global_weight=0.8,
+):
+    """
+    Balanced global camera motion removal:
+
+    - Detect background pixels using low flow magnitude
+    - Fit affine transform using RANSAC
+    - Smooth global flow
+    - Subtract weighted global flow
+    """
+    H, W, _ = flow.shape
+
+    xs, ys = np.meshgrid(np.arange(W), np.arange(H))
+    pts1 = np.stack([xs.ravel(), ys.ravel()], axis=1).astype(np.float32)
+    pts2 = pts1 + flow.reshape(-1, 2)
+
+    mag = np.linalg.norm(flow.reshape(-1, 2), axis=1)
+    thr = np.percentile(mag, bg_percentile)
+
+    bg_idx = np.where(mag < thr)[0]
+    if bg_idx.size < min_bg_points:
+        bg_idx = np.arange(mag.size)
+
+    # random subset
+    Nbg = bg_idx.size
+    sample_size = min(max(int(Nbg * sample_ratio), 2000), Nbg)
+    sel = np.random.choice(bg_idx, size=sample_size, replace=False)
+
+    pts1_s = pts1[sel]
+    pts2_s = pts2[sel]
+
+    # try affine RANSAC
+    M, inliers = cv2.estimateAffine2D(
+        pts1_s, pts2_s,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=ransac_thresh
+    )
+
+    if M is not None:
+        pts2_pred = (pts1 @ M[:,:2].T + M[:,2]).reshape(H, W, 2)
+    else:
+        # fallback to homography
+        Hmat, inliers = cv2.findHomography(
+            pts1_s, pts2_s,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=ransac_thresh
+        )
+        if Hmat is None:
+            return flow
+        pts2_pred = cv2.perspectiveTransform(
+            pts1.reshape(1,-1,2), Hmat
+        ).reshape(H, W, 2)
+
+    pts2_pred = cv2.GaussianBlur(pts2_pred, (0,0), sigmaX=1.5)
+    global_flow = pts2_pred - pts1.reshape(H, W, 2)
+
+    return flow - global_weight * global_flow
+
+
+# =====================================================================
+# MULTI-GAP RAFT
+# =====================================================================
+
+@torch.no_grad()
+def compute_multi_gap_flow(model, rgb_frames, t, iters=32):
+    """Compute averaged multi-gap RAFT flow for index t."""
+    gaps = [1, -1, 2, -2]
+    flows = []
+
+    for g in gaps:
+        t2 = t + g
+        if t2 < 0 or t2 >= len(rgb_frames):
+            continue
+
+        flow = run_raft(
+            model,
+            img_to_tensor(rgb_frames[t]),
+            img_to_tensor(rgb_frames[t2]),
+            iters=iters
+        )
+        flows.append(flow)
+
+    if len(flows) == 0:
+        t2 = min(t+1, len(rgb_frames)-1)
+        return run_raft(
+            model,
+            img_to_tensor(rgb_frames[t]),
+            img_to_tensor(rgb_frames[t2]),
+            iters=iters
+        )
+
+    return np.mean(np.stack(flows, axis=0), axis=0)
+
+
+# =====================================================================
+# SAVE FLOW VISUALIZATION
+# =====================================================================
+
+def save_flow_color(flow, path):
+    img = flow_viz.flow_to_image(flow)
+    cv2.imwrite(path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+
+# =====================================================================
+# PROCESS ONE DAVIS SEQUENCE
+# =====================================================================
+
+def process_sequence(model, seq_path, out_flow_path, out_color_path, iters=32):
+    frames = sorted([f for f in os.listdir(seq_path) if f.endswith(".jpg")])
+
+    # load all frames
+    rgb_frames = []
+    for f in frames:
+        img = cv2.imread(os.path.join(seq_path, f))
+        rgb_frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
     os.makedirs(out_flow_path, exist_ok=True)
     os.makedirs(out_color_path, exist_ok=True)
 
-    for i in range(len(frames) - 1):
-        f1 = os.path.join(seq_path, frames[i])
-        f2 = os.path.join(seq_path, frames[i+1])
-        img1 = load_image(f1).cuda()
-        img2 = load_image(f2).cuda()
+    print(f"  Total frames: {len(frames)}")
 
-        flow = compute_flow(model, img1, img2)
+    prev_flow = None
+    temporal_alpha = 0.7  # smoothing
 
-        # Save raw flow
-        npy_name = f"{frames[i][:-4]}_{frames[i+1][:-4]}.npy"
-        np.save(os.path.join(out_flow_path, npy_name), flow)
+    for i in tqdm(range(len(frames))):
 
-        # Save flow-color
-        png_name = f"{frames[i][:-4]}_{frames[i+1][:-4]}.png"
-        save_flow_color(flow, os.path.join(out_color_path, png_name))
+        flow_raw = compute_multi_gap_flow(model, rgb_frames, i, iters=iters)
+        flow_cam_removed = remove_global_motion(flow_raw)
 
+        if prev_flow is None:
+            flow_final = flow_cam_removed
+        else:
+            flow_final = temporal_alpha * flow_cam_removed + (1-temporal_alpha) * prev_flow
+
+        prev_flow = flow_final
+
+        # save .npy
+        fname = frames[i].replace(".jpg", ".npy")
+        np.save(os.path.join(out_flow_path, fname), flow_final.astype(np.float32))
+
+        # save visualization
+        png = frames[i].replace(".jpg", ".png")
+        save_flow_color(flow_final, os.path.join(out_color_path, png))
+
+
+# =====================================================================
+# MAIN
+# =====================================================================
 
 def main():
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--davis_root", type=str, required=True,
-                        help="datasets/DAVIS2017")
-    parser.add_argument("--model_path", type=str, required=True,
-                        help="RAFT checkpoint")
-    parser.add_argument("--out_root", type=str, required=True,
-                        help="Output folder to store flows")
+    parser.add_argument("--davis_root", type=str,
+                        default="datasets/DAVIS/JPEGImages/480p")
+    parser.add_argument("--model_path", type=str,
+                        default="third_party/RAFT/models/raft-things.pth")
+    parser.add_argument("--out_root", type=str,
+                        default="./Variant_1_output/raft_flow")
+    parser.add_argument("--iters", type=int, default=32)
+
     args = parser.parse_args()
 
-    jpeg_path = os.path.join(args.davis_root, "JPEGImages", "480p")
+    print("\nLoading RAFT model...")
+    args_raft = argparse.Namespace(
+        small=False,
+        mixed_precision=True,
+        alternate_corr=False  # Windows-safe
+    )
 
-    # Load RAFT model
-    model = RAFT(restore_ckpt=args.model_path)
-    model = model.cuda().eval()
+    model = RAFT(args_raft).to(DEVICE).eval()
+    ckpt = torch.load(args.model_path, map_location=DEVICE)
+    model.load_state_dict(ckpt, strict=True)
+    print("RAFT loaded.\n")
 
-    sequences = sorted(os.listdir(jpeg_path))
+    sequences = sorted(os.listdir(args.davis_root))
 
     for seq in sequences:
-        print(f"Processing sequence: {seq}")
+        print(f"\n=== Processing sequence: {seq} ===")
+        seq_path = os.path.join(args.davis_root, seq)
 
-        seq_path = os.path.join(jpeg_path, seq)
-        out_flow_path = os.path.join(args.out_root, "flow_npy", seq)
-        out_color_path = os.path.join(args.out_root, "flow_rgb", seq)
+        out_flow = os.path.join(args.out_root, "flow_npy", seq)
+        out_color = os.path.join(args.out_root, "flow_rgb", seq)
 
-        process_sequence(seq_path, out_flow_path, out_color_path, model)
+        process_sequence(model, seq_path, out_flow, out_color, iters=args.iters)
 
 
 if __name__ == "__main__":
