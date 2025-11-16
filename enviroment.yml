@@ -1,0 +1,23 @@
+name: flowi-sam
+channels:
+  - pytorch
+  - defaults
+  - conda-forge
+
+dependencies:
+  - python=3.10
+  - numpy=1.24.4
+  - scipy=1.10.1
+  - pillow=10.0.0
+  - matplotlib=3.7.2
+  - tqdm=4.66.1
+  - scikit-image=0.21.0
+  - imageio=2.31.1
+  - imageio-ffmpeg=0.4.9
+  - pip=23.2
+  - pip:
+      - opencv-python==4.8.1.78
+      - opencv-python-headless==4.8.1.78
+      - simplejson==3.19.2
+      - pyyaml==6.0.1
+      - git+https://github.com/facebookresearch/segment-anything.git

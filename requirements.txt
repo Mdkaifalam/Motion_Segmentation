@@ -1,8 +1,41 @@
-torch
-torchvision
-numpy
-opencv-python
-matplotlib
-tqdm
-huggingface_hub
-segment-anything
+# -------------------------
+# Core scientific packages
+# -------------------------
+numpy==1.24.4
+scipy==1.10.1
+opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
+Pillow==10.0.0
+matplotlib==3.7.2
+tqdm==4.66.1
+
+# -------------------------
+# PyTorch (install CUDA version manually)
+# -------------------------
+# DO NOT pip install torch from here — install separately for GPU compatibility
+# See README instructions
+torch==2.1.0
+torchvision==0.16.0
+
+# -------------------------
+# SAM (Segment Anything)
+# -------------------------
+git+https://github.com/facebookresearch/segment-anything.git
+
+# -------------------------
+# RAFT dependencies
+# (RAFT repo is cloned manually; these libs ensure utils work)
+# -------------------------
+imageio==2.31.1
+imageio-ffmpeg==0.4.9
+
+# -------------------------
+# Evaluation (DAVIS)
+# -------------------------
+scikit-image==0.21.0
+
+# -------------------------
+# JSON + misc
+# -------------------------
+simplejson==3.19.2
+pyyaml==6.0.1

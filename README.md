@@ -5,12 +5,28 @@ This project implements motion segmentation pipelines including:
 - RAFT-based Flow-SAM motion segmentation
 - Evaluation on DAVIS and FBMS datasets
 
-### Dataset :
+## Dataset :
 ```
 wget https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip
 ```
 then unzip it and store in the `datasets/`
 
+## Installation Guide
+
+### Windows Setup
+```powershell
+conda env create -f environment.yml
+conda activate motion_env
+bash setup.sh
+```
+
+### Linux Setup
+
+```bash
+conda env create -f environment.yml
+conda activate motion_env
+bash setup.sh
+```
 
 ### Structure
 - `src/` – source code for baseline and Flow-SAM variants  
