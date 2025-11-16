@@ -7,9 +7,9 @@ This project implements motion segmentation pipelines including:
 
 ### Dataset :
 ```
-https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip
+wget https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip
 ```
-
+then unzip it and store in the `datasets/`
 
 
 ### Structure
@@ -63,8 +63,7 @@ git clone https://github.com/princeton-vl/RAFT.git
 cd RAFT
 bash download_models.sh
 ```
-
-RAFT Directory Structure
+#### RAFT Directory Structure
 third_party/
 └── RAFT/
     ├── alt_cuda_corr/
@@ -86,3 +85,29 @@ third_party/
     ├── train_mixed.sh
     ├── train_standard.sh
     └── utils/
+
+
+- Step 2 : Install SAM ViT-h checkpoint
+
+```
+mkdir -p sam_checkpoint
+cd sam_checkpoint
+
+wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
+```
+
+- Step 3 : Run the following code to get the optical flow from RAFT.
+
+```
+python .\src\Variant_1\compute_flow_raft.py --davis_root datasets/DAVIS/JPEGImages/480p -- model_path third_party/RAFT/models/raft-things.pth 
+--out_dir ./Variant_1_output/raft_flow --sequence all 
+```
+- Step 4 : Run the following code to get the mask of all the optical flow.
+```
+python .\src\Variant_1\flow_to_motion_mask_v3.py --flow_root ./Variant_1_output/raft_flow --out_root ./Variant_1_output/flowI_motion --threshold_model top_p --percentile 95 --top_p 0.05 --A_min 500 --smooth_kernel 7 --no_bilateral --sequence all
+```
+- Step 5 : Run the flowI-SAM model to get the video along with the mask.
+
+```
+python .\src\Variant_1\flowI_sam.py --sequence all --verbose --flowI_root ./Variant_1_output/flowI_motion --output_root ./Variant_1_output/flowI_sam_output
+```

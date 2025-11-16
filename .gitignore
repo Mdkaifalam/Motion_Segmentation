@@ -6,6 +6,8 @@ RS_Papers/
 checks/
 third_party/
 Variant_1_output/
+sam_checkpoint/
+
 # Ignore checkpoints, logs, and cache
 *.pt
 *.pth
@@ -14,5 +16,6 @@ __pycache__/
 *.log
 *.npy
 *.pdf
+*log.txt
 # VSCode
 .vscode/
